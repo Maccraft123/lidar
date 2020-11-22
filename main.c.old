@@ -1,0 +1,126 @@
+#include <stdio.h>
+#include <errno.h>
+#include <fcntl.h> 
+#include <string.h>
+#include <termios.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <time.h>
+
+uint8_t buf[36];
+uint16_t dst[360];
+
+int set_interface_attribs (int fd, int speed, int parity)
+{
+	struct termios tty;
+	if (tcgetattr (fd, &tty) != 0)
+	{
+		printf("error %d from tcgetattr\n", errno);
+		return -1;
+	}
+
+	cfsetospeed (&tty, speed);
+	cfsetispeed (&tty, speed);
+
+	tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;     // 8-bit chars
+	// disable IGNBRK for mismatched speed tests; otherwise receive break
+	// as \000 chars
+	tty.c_iflag &= ~IGNBRK;         // disable break processing
+	tty.c_lflag = 0;                // no signaling chars, no echo,
+	// no canonical processing
+	tty.c_oflag = 0;                // no remapping, no delays
+	tty.c_cc[VMIN]  = 0;            // read doesn't block
+	tty.c_cc[VTIME] = 5;            // 0.5 seconds read timeout
+
+	tty.c_iflag &= ~(IXON | IXOFF | IXANY); // shut off xon/xoff ctrl
+
+	tty.c_cflag |= (CLOCAL | CREAD);// ignore modem controls,
+	// enable reading
+	tty.c_cflag &= ~(PARENB | PARODD);      // shut off parity
+	tty.c_cflag |= parity;
+	tty.c_cflag &= ~CSTOPB;
+	tty.c_cflag &= ~CRTSCTS;
+
+	if (tcsetattr (fd, TCSANOW, &tty) != 0)
+	{
+		printf ("error %d from tcsetattr\n", errno);
+		return -1;
+	}
+	return 0;
+}
+
+void set_blocking (int fd, int should_block)
+{
+	struct termios tty;
+	memset (&tty, 0, sizeof tty);
+	if (tcgetattr (fd, &tty) != 0)
+	{
+		printf ("error %d from tggetattr\n", errno);
+		return;
+	}
+
+	tty.c_cc[VMIN]  = should_block ? 1 : 0;
+	tty.c_cc[VTIME] = 5;            // 0.5 seconds read timeout
+
+	if (tcsetattr (fd, TCSANOW, &tty) != 0)
+		printf ("error %d setting term attributes\n", errno);
+}
+
+
+int main(void)
+{
+	char *portname = "/dev/ttyUSB0";
+
+	int fd = open(portname, O_RDWR | O_NOCTTY | O_NONBLOCK);
+	uint8_t frame = 0;
+
+	if (fd < 0)
+	{
+		printf("error %d opening %s: %s \n", errno, portname, strerror (errno));
+		return 0;
+	}
+
+	set_interface_attribs(fd, B115200, 0);
+	set_blocking(fd, 0);
+
+	uint16_t speed = 0;
+	uint16_t startAngle = 0;
+	uint16_t distance[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+	uint8_t quality[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+	while (1)
+	{
+		frame = 0;
+		read(fd, buf, sizeof buf);
+
+		for (int x = 1; x < 36; x++)
+		{
+			//printf("%x ", buf[x]);
+			if (buf[x] == 0x55 && buf[x+1] == 0xAA)
+			{
+				if (buf[x+2] == 0x3 && buf[x+3] == 0x8)
+				{
+					//printf("\n");
+					frame = 1;
+					speed =  ((uint16_t) (buf[x+5] << 8) | buf[x+4]) / 64.0;
+					startAngle = (uint16_t) (buf[x+7] << 8 | buf[x+6]) / 64.0 - 640.0;
+					distance[0] = (uint16_t) (buf[x+9] << 8 | buf[x+8]);
+					quality[0] = buf[x+10];
+					if (quality[0] > 25)
+						dst[startAngle/2] = distance[0];
+				}
+			}
+		}
+
+		if (frame == 0)
+		{
+			usleep(1);
+		}
+
+		//printf("speed: %d RPM angle: %d DEG distance: %d        \r", speed, startAngle, quality[0] >10 ? 0 : distance[0]);
+		fflush(stdout);
+		//printf("\n");
+	}
+
+	return 0;
+}
